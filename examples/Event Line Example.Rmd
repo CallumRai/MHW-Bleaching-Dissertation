@@ -1,0 +1,93 @@
+---
+title: "Event Line Example"
+author: "Hollie Parry"
+date: "28/09/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+## Download subsetted data
+### Setup
+Access to the NOAA OISST dataset on the ERDDAP server is required for subsetted data and 
+by loading these packages it will ensure that all data we may need is downloaded to R.
+
+```{r library, message=FALSE, warning=FALSE}
+library(dplyr) # A staple for modern data management in R
+library(lubridate) # Useful functions for dealing with dates
+library(ggplot2) # The preferred library for data visualisation
+library(tidync) # For easily dealing with NetCDF data
+library(rerddap) # For easily downloading subsets of data
+library(doParallel) # For parallel processing
+library(heatwaveR)
+```
+
+### Download function
+A wrapper function is required to control the range of times that are downloaded as the ERDDAP server struggles to access data from more than 9 consecutive years within one request. This function will download and prepare data based on start and end dates provided by the user. 
+
+The latitude and longitude selected correspond to a specific point in the Caribbean that we know to have a lot of coral but in future analysis a larger geographic area will be selected, and an average will be taken. This function also renames the ‘sst’ column as ‘temp’ and the ‘time’ column as ‘t’ so that they correlate with column names expected when using Hobday et al. (2016) to calculate MHWs.
+```{r download function}
+OISST_sub_dl <- function(time_df){
+  OISST_dat <- griddap(x = "ncdcOisst21Agg_LonPM180", 
+                       url = "https://coastwatch.pfeg.noaa.gov/erddap/", 
+                       time = c(time_df$start, time_df$end), 
+                       zlev = c(0, 0),
+                       latitude = c(20.624, 20.626),
+                       longitude = c(-77.626, -77.624),
+                       fields = "sst")$data %>% 
+    mutate(time = as.Date(stringr::str_remove(time, "T00:00:00Z"))) %>% 
+    dplyr::rename(t = time, temp = sst) %>% 
+    select(lon, lat, t, temp) %>% 
+    na.omit()
+}
+```
+
+### Date range
+A dataframe of start and end dates is required to automate the entire download of OISST data from 1982-01-01 to 2019-12-31. This is because the server not only struggles to access data from 9 consecutive years, but it also ends user connection after ~17 individual files have been requested. Therefore, the data cannot all be downloaded with one request nor can data from each year be downloaded individually, hence the need to request data in multiple batches. 
+```{r date range}
+dl_years <- data.frame(date_index = 1:5,
+                       start = as.Date(c("1982-01-01", "1990-01-01", 
+                                         "1998-01-01", "2006-01-01", "2014-01-01")),
+                       end = as.Date(c("1989-12-31", "1997-12-31", 
+                                       "2005-12-31", "2013-12-31", "2019-12-31")))
+```
+
+### Download and prepare data
+This code chunk allows for all the data to be downloaded with one nested approach. The code may need to be re-run a couple of times to ensure all data is downloaded as it is prone to timing out. The stability and speed of connection can greatly influence how long this section takes to be completed. 
+```{r download and data}
+OISST_data <- dl_years %>% 
+  group_by(date_index) %>% 
+  group_modify(~OISST_sub_dl(.x)) %>% 
+  ungroup() %>% 
+  select(lon, lat, t, temp)
+```
+
+## Detection of marine heatwaves (MHWs)
+### Time and temperature selection
+This code ensures only the ‘time’ and temperature columns are selected, as this is the format required for the calculation of MHWs. 
+```{r time and temp}
+OISST_data <- OISST_data[c("t","temp")]
+```
+
+### Establish climatology
+Using a user-specified sliding-window for the mean and threshold calculation, a daily climatology from a time series of daily temperatures is created. This is followed by an optional moving average smoother, as used by Hobday et al. (2016)
+```{r climatology}
+ts <- ts2clm(OISST_data, climatologyPeriod = c("1982-01-01", "2019-12-31"))
+```
+
+### Detect events
+The Hobday et al. (2016) MHW definition is applied to an input of time series of a give value (such as temperature) along with a daily date vector and pre-calculated seasonal and threshold climatologies, as created by the previous chunk of code: ts2clm. This allows for the detection of heatwaves, the focus of this research, and also coldspells. 
+```{r detect events}
+mhw <- detect_event(ts)
+```
+
+## MHW event visualisation  
+
+By applying event_line() directly onto the output of detect_event(), MHWs can be visualised. This event line illustrates a graph of warm events, as per Hobday et al. (2016), from 2014-01-01 to 2019-12-31 at the precise point chosen in the Caribbean. 
+```{r event line plot, warning=FALSE}
+event_line(mhw, metric = "intensity_max", 
+           start_date = "2014-01-01", end_date = "2019-12-31")
+```
